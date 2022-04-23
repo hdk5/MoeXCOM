@@ -49,8 +49,10 @@ Ref: [FlatBuffers](https://google.github.io/flatbuffers)
 .fbs from il2cppDumper: [here](unpack.fbs), the generator will provided if needs  
 unpack steps: (partial code, issue welcome if full-code needed)  
 ```go
+loadFlatBuffer(new(flat.ScenarioCharacterNameExcelTable))
+
 func loadFlatBuffer[T flatbuffers.FlatBuffer](table T) (T, []byte) {
-  name := reflect.TypeOf(table).Elem().Name()
+  name := reflect.TypeOf(table).Elem().Name() // "ScenarioCharacterNameExcelTable"
   data, err := os.ReadFile(strings.ToLower(name) + ".bytes")
   if err != nil {
     panic(err)

@@ -70,5 +70,53 @@ func loadFlatBuffer[T flatbuffers.FlatBuffer](table T) (T, []byte) {
   return table, CreateKeyByString(strings.ReplaceAll(name, "ExcelTable", ""), 8)
 }
 ```
+then decrypt value by those:
+```go
+func decodeAnyScalar[T any](v T, key []byte) T {
+	size := unsafe.Sizeof(v)
+	if size < 4 {
+		return v
+	}
+	switch size {
+	case 4:
+		if *(*uint32)(unsafe.Pointer(&v)) != 0{
+			*(*uint32)(unsafe.Pointer(&v)) ^= bArrAsAnyFirst[uint32](key)
+		}
+	case 8:
+		if *(*uint64)(unsafe.Pointer(&v)) != 0{
+			*(*uint64)(unsafe.Pointer(&v)) ^= bArrAsAnyFirst[uint64](key)
+		}
+	default:
+		b := asArray(unsafe.Pointer(&v), size)
+		h := false
+		for i := range b {
+			if b[i] != 0 {
+				h = true
+				break
+			}
+		}
+		if h {
+			for i := range b {
+				b[i] ^= key[i]
+			}
+		}
+	}
+	return v
+}
+
+func decodeStr(data []byte, key []byte) string {
+	if len(data) == 0 {
+		return `""`
+	}
+	raw, err := base64.StdEncoding.DecodeString(string(data))
+	if err != nil {
+		panic(err)
+	}
+	Xor(raw, key)
+	d, _ := json.Marshal(string(utf16.Decode(bArrAsU16Arr(raw))))
+	return string(d)
+}
+```
+
 
 # copyright Yostar

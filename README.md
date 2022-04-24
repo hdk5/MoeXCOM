@@ -16,71 +16,107 @@ It looks like no major scripting is used there, unlike with, for example, [Azur 
 
 All code is actually written in C# in Unity, and then compiled with IL2CPP into libil2cpp.so, so no way to extract IL or C# sources
 
-Use [Il2CppInspector](https://github.com/djkaty/Il2CppInspector/blob/master/README.md) to extract C# types and [generate script](https://github.com/djkaty/Il2CppInspector/blob/master/README.md#adding-metadata-to-your-ghidra-workflow) to use with [Ghidra SRE](https://github.com/NationalSecurityAgency/ghidra)
+Use [Il2CppDumper](https://github.com/Perfare/Il2CppDumper) to extract C# types and [generate script](https://github.com/djkaty/Il2CppInspector/blob/master/README.md#adding-metadata-to-your-ghidra-workflow) to use with [Ghidra SRE](https://github.com/NationalSecurityAgency/ghidra)
 
 Read [this](https://katyscode.wordpress.com/2020/06/24/il2cpp-part-1/) and [this](https://katyscode.wordpress.com/2020/12/27/il2cpp-part-2/)
 
 ## Unpacking password-protected table bundles
 
-See function `TableService_LoadBytes`
+Get list from files/TableBundles/TableCatalog.json
 
-```cpp
-this_00 = (ZipInputStream *)thunk_FUN_0195f408(ZipInputStream__TypeInfo);
-ZipInputStream__ctor(this_00,(Stream *)baseInputStream,(MethodInfo *)0x0);
-local_4c = XXHashService_CalculateHash(pSVar2,(MethodInfo *)0x0);
-pSVar2 = (String *)FUN_03dfd014(&local_4c,0);
-if (this_00 != (ZipInputStream *)0x0) {
-  this_00->password = pSVar2;
-```
+stored file name: xxHash64(zip-original-name), etc: `3622299440866786438` => `Excel.zip`
 
-Take xxHash of zip-file name, use its decimal representation as a password
-
-## Reading unpacked above `.bytes` files
-
-No solution here yet
-
-See function `TableEncryptionService_XOR`
-
-```cpp
-seed = XXHashService_CalculateHash(name,(MethodInfo *)0x0);
-this = (MersenneTwister *)thunk_FUN_0195f408(MersenneTwister__TypeInfo);
-MersenneTwister__ctor_1(this,seed,(MethodInfo *)0x0);
-if ((bytes != (Byte__Array *)0x0) && (this != (MersenneTwister *)0x0)) {
-  pBVar1 = MersenneTwister_NextBytes(this,*(int32_t *)&bytes->max_length,(MethodInfo *)0x0);
-  if (0 < (int)bytes->max_length) {
-    uVar4 = bytes->max_length & 0xffffffff;
-    uVar3 = 0;
-    do {
-      if (uVar4 <= uVar3) {
-LAB_02ae28d4:
-        uVar2 = thunk_FUN_019574bc();
-                  /* WARNING: Subroutine does not return */
-        FUN_019a247c(uVar2,0);
-      }
-      if (pBVar1 == (Byte__Array *)0x0) goto LAB_02ae28e0;
-      if (*(uint *)&pBVar1->max_length <= uVar3) goto LAB_02ae28d4;
-      bytes->vector[uVar3] = pBVar1->vector[uVar3] ^ bytes->vector[uVar3];
-      uVar3 = uVar3 + 1;
-    } while ((long)uVar3 < (long)(int)uVar4);
-  }
-  return bytes;
+password: (Pseudocode)
+```go
+pass := base64.RawStdEncoding.EncodeToString(
+  CreateKey(
+    xxHash32.Checksum([]byte(archive.Name), 0)
+    , 15)
+  )
+func CreateKey(key uint32, length int) []byte {
+  mt := newMersenneTwister(key)
+  buf := make([]byte, length)
+  mt.Read(buf)
+  return buf
 }
 ```
 
-Files are also encrypted with an OTP-XOR cipher.
+See IDA function `TableService$$LoadBytes`
 
-The key is generated with a Mersenne Twister PRNG with a password as an initial seed.
+## Reading unpacked above `.bytes` files
 
-The password for each file is case sensitive name of matching C# class
+Ref: [FlatBuffers](https://google.github.io/flatbuffers)  
+.fbs from il2cppDumper: [here](unpack.fbs), the generator will provided if needs  
+unpack steps: (partial code, issue welcome if full-code needed)  
+```go
+loadFlatBuffer(new(flat.ScenarioCharacterNameExcelTable))
 
-For example, for file `academyfavorscheduleexceltable.bytes` the password is `AcademyFavorScheduleExcelTable`
+func loadFlatBuffer[T flatbuffers.FlatBuffer](table T) (T, []byte) {
+  name := reflect.TypeOf(table).Elem().Name() // "ScenarioCharacterNameExcelTable"
+  data, err := os.ReadFile(strings.ToLower(name) + ".bytes")
+  if err != nil {
+    panic(err)
+  }
+  _key := CreateKey(xxHash32.Checksum([]byte(name), 0), len(data))
+  arr := bArrAsU64Arr(data)
+  key := bArrAsU64Arr(_key)
+  for i := range arr {
+    arr[i] ^= key[i]
+  }
+  for i := len(data) - len(data)%8; i < len(data); i++ {
+    data[i] ^= _key[i]
+  }
+  flatbuffers.GetRootAs(data, 0, table)
+  return table, CreateKeyByString(strings.ReplaceAll(name, "ExcelTable", ""), 8)
+}
+```
+then decrypt value by those:
+```go
+func decodeAnyScalar[T any](v T, key []byte) T {
+	size := unsafe.Sizeof(v)
+	if size < 4 {
+		return v
+	}
+	switch size {
+	case 4:
+		if *(*uint32)(unsafe.Pointer(&v)) != 0{
+			*(*uint32)(unsafe.Pointer(&v)) ^= bArrAsAnyFirst[uint32](key)
+		}
+	case 8:
+		if *(*uint64)(unsafe.Pointer(&v)) != 0{
+			*(*uint64)(unsafe.Pointer(&v)) ^= bArrAsAnyFirst[uint64](key)
+		}
+	default:
+		b := asArray(unsafe.Pointer(&v), size)
+		h := false
+		for i := range b {
+			if b[i] != 0 {
+				h = true
+				break
+			}
+		}
+		if h {
+			for i := range b {
+				b[i] ^= key[i]
+			}
+		}
+	}
+	return v
+}
 
-Need to find out what to do next with decrypted file
+func decodeStr(data []byte, key []byte) string {
+	if len(data) == 0 {
+		return `""`
+	}
+	raw, err := base64.StdEncoding.DecodeString(string(data))
+	if err != nil {
+		panic(err)
+	}
+	Xor(raw, key)
+	d, _ := json.Marshal(string(utf16.Decode(bArrAsU16Arr(raw))))
+	return string(d)
+}
+```
 
-## Find the code responsible for Korea/Elsewhere asset choices
 
-i.e. Aris censorship
-
-No solution here yet
-
-Look into functions `ScenarioData_TryGetBgNameExcel`, `ScenarioData_GetBGName_GlobalExcel`
+# copyright Yostar
